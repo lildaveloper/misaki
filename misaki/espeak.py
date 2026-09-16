@@ -1,13 +1,18 @@
 from phonemizer.backend.espeak.wrapper import EspeakWrapper
 from typing import Tuple
-import espeakng_loader
 import phonemizer
+import os
 import re
 
-# Set espeak-ng library path and espeak-ng-data
-EspeakWrapper.set_library(espeakng_loader.get_library_path())
-# Change data_path as needed when editing espeak-ng phonemes
-EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+try:
+    import espeakng_loader
+    os.environ.setdefault('ESPEAK_DATA_PATH', espeakng_loader.get_data_path())
+    # Set espeak-ng library path and espeak-ng-data
+    EspeakWrapper.set_library(espeakng_loader.get_library_path())
+    # Change data_path as needed when editing espeak-ng phonemes
+    EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+except ImportError:
+    espeakng_loader = None
 
 # EspeakFallback is used as a last resort for English
 class EspeakFallback:
@@ -28,7 +33,7 @@ class EspeakFallback:
         '\u0303':'',
     }.items(), key=lambda kv: -len(kv[0]))
 
-    def __init__(self, british, version=None):
+    def __init__(self, british=False, version=None):
         self.british = british
         self.version = version
         self.backend = phonemizer.backend.EspeakBackend(

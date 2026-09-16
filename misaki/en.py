@@ -9,8 +9,6 @@ import numpy as np
 import re
 import spacy
 import unicodedata
-from transformers import BartForConditionalGeneration
-import torch
 
 def merge_tokens(tokens: List[MToken], unk: Optional[str] = None) -> MToken:
     stress = {tk._.stress for tk in tokens if tk._.stress is not None}
@@ -25,7 +23,7 @@ def merge_tokens(tokens: List[MToken], unk: Optional[str] = None) -> MToken:
                 phonemes += ' '
             phonemes += unk if tk.phonemes is None else tk.phonemes
     return MToken(
-        text=''.join(tk.text + tk.whitespace for tk in tokens[:-1]) + tokens[-1].text,
+        text=(''.join(tk.text + tk.whitespace for tk in tokens[:-1]) + tokens[-1].text).strip(),
         tag=max(tokens, key=lambda tk: sum(1 if c == c.lower() else 2 for c in tk.text)).tag,
         whitespace=tokens[-1].whitespace,
         phonemes=phonemes,
@@ -158,7 +156,7 @@ class Lexicon:
 
     def get_NNP(self, word):
         ps = [self.golds.get(c.upper()) for c in word if c.isalpha()]
-        if None in ps:
+        if None in ps or not ps:
             return None, None
         ps = apply_stress(''.join(ps), 0)
         ps = ps.rsplit(SECONDARY_STRESS, 1)
@@ -231,7 +229,7 @@ class Lexicon:
         is_NNP = None
         if word == word.upper() and word not in self.golds:
             word = word.lower()
-            is_NNP = tag == 'NNP' #Lexicon.get_parent_tag(tag) == 'NOUN'
+            is_NNP = tag in ('NNP', 'NNPS') #Lexicon.get_parent_tag(tag) == 'NOUN'
         ps, rating = self.golds.get(word), 4
         if ps is None and not is_NNP:
             ps, rating = self.silvers.get(word), 3
@@ -241,7 +239,7 @@ class Lexicon:
             elif tag not in ps:
                 tag = Lexicon.get_parent_tag(tag)
             ps = ps.get(tag, ps['DEFAULT'])
-        if ps is None or (is_NNP and PRIMARY_STRESS not in ps):
+        if ps is None:
             ps, rating = self.get_NNP(word)
             if ps is not None:
                 return ps, rating
@@ -334,12 +332,14 @@ class Lexicon:
             return ps, rating
         wl = word.lower()
         if len(word) > 1 and word.replace("'", '').isalpha() and word != word.lower() and (
-            tag != 'NNP' or len(word) > 7
+            tag not in ('NNP', 'NNPS') or len(word) > 7
         ) and word not in self.golds and word not in self.silvers and (
             word == word.upper() or word[1:] == word[1:].lower()
         ) and (
-            wl in self.golds or wl in self.silvers or any(
-                fn(wl, tag, stress, ctx)[0] for fn in (self.stem_s, self.stem_ed, self.stem_ing)
+            wl in self.golds or wl in self.silvers or (
+                (word != word.upper() or len(word) > 3) and any(
+                    fn(wl, tag, stress, ctx)[0] for fn in (self.stem_s, self.stem_ed, self.stem_ing)
+                )
             )
         ):
             word = wl
@@ -496,7 +496,23 @@ class Lexicon:
 
 class FallbackNetwork:
     def __init__(self, british):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            import torch
+            from transformers import BartForConditionalGeneration
+        except ImportError as e:
+            raise ImportError(
+                "FallbackNetwork requires 'torch' and 'transformers'. "
+                "Install with: pip install 'misaki[neural]'"
+            ) from e
+
+        self.torch = torch
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
+
         self.model = BartForConditionalGeneration.from_pretrained(
             "PeterReid/graphemes_to_phonemes_en_" + ("gb" if british else "us"))
         self.model.to(self.device)
@@ -511,10 +527,10 @@ class FallbackNetwork:
         return "".join([self.token_to_phoneme.get(t, '') for t in tokens if t > 3])
 
     def __call__(self, input_token):
-        input_ids = torch.tensor([self.graphemes_to_tokens(input_token.text)], device = self.device)
+        input_ids = self.torch.tensor([self.graphemes_to_tokens(input_token.text)], device=self.device)
 
-        with torch.no_grad():
-            generated_ids = self.model.generate(input_ids = input_ids)
+        with self.torch.no_grad():
+            generated_ids = self.model.generate(input_ids=input_ids)
         output_text = self.tokens_to_phonemes(generated_ids[0].tolist())
         return (output_text, 1)
 
@@ -528,11 +544,19 @@ class G2P:
         components = ['transformer' if trf else 'tok2vec', 'tagger']
         self.nlp = spacy.load(name, enable=components)
         self.lexicon = Lexicon(british)
-        self.fallback = fallback if fallback else FallbackNetwork(british)
+        if fallback == 'neural':
+            self.fallback = FallbackNetwork(british)
+        elif fallback == 'espeak':
+            from . import espeak
+            self.fallback = espeak.EspeakFallback(british=british)
+        else:
+            self.fallback = fallback
         self.unk = unk
 
     @staticmethod
     def preprocess(text):
+        text = text.replace(chr(8216), "'").replace(chr(8217), "'")
+        text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
         result = ''
         tokens = []
         features = {}
