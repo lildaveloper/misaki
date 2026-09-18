@@ -67,6 +67,38 @@ NON_QUOTE_PUNCTS = frozenset(p for p in PUNCTS if p not in '"“”')
 # https://github.com/explosion/spaCy/blob/master/spacy/glossary.py
 PUNCT_TAGS = frozenset([".",",","-LRB-","-RRB-","``",'""',"''",":","$","#",'NFP'])
 PUNCT_TAG_PHONEMES = {'-LRB-':'(', '-RRB-':')', '``':chr(8220), '""':chr(8221), "''":chr(8221)}
+NP_TAGS = frozenset(['DT', 'JJ', 'JJR', 'JJS', 'NN', 'NNS', 'NNP', 'NNPS', 'CD', 'CC', 'PRP$', 'RB'])
+PLURAL_AUX_VERBS = frozenset(['were', 'are', "'re", 'have', "'ve"])
+INITIAL_SPECIFIERS = frozenset(['DT', 'PRP$', 'JJ', 'JJR', 'JJS', 'NN', 'NNP'])
+CLAUSE_PUNCT = frozenset(['.', '?', '!', ':', ';', ',', '—', '--', '-LRB-', '-RRB-'])
+OPEN_PUNCT_TAGS = frozenset(['``', "''", '""', '-LRB-'])
+OPEN_PUNCT_CHARS = frozenset(['"', "'", '“', '”', '‘', '’', '(', '[', '{'])
+
+def is_clause_subject_head(tokens, idx):
+    clause_start = 0
+    for j in range(idx - 1, -1, -1):
+        tag = getattr(tokens[j], 'tag_', getattr(tokens[j], 'tag', ''))
+        text = tokens[j].text.lower()
+        if tag in CLAUSE_PUNCT or text in ('and', 'but', 'or', '(', '[', '{'):
+            clause_start = j + 1
+            break
+    while clause_start < idx:
+        tag = getattr(tokens[clause_start], 'tag_', getattr(tokens[clause_start], 'tag', ''))
+        text = tokens[clause_start].text
+        if tag in OPEN_PUNCT_TAGS or text in OPEN_PUNCT_CHARS:
+            clause_start += 1
+        else:
+            break
+    return all(getattr(tk, 'tag_', getattr(tk, 'tag', '')) in INITIAL_SPECIFIERS for tk in tokens[clause_start:idx])
+
+def has_downstream_verb(tokens, after_idx):
+    for tk in tokens[after_idx:]:
+        tag = getattr(tk, 'tag_', getattr(tk, 'tag', ''))
+        if tag in ('.', ':', ';', '-RRB-') or getattr(tk, 'text', '') in (')', ']', '}'):
+            break
+        if tag in ('VBD', 'VBZ', 'VBP', 'MD'):
+            return True
+    return False
 
 LEXICON_ORDS = [39, 45, *range(65, 91), *range(97, 123)]
 CONSONANTS = frozenset('bdfhjklmnpstvwzðŋɡɹɾʃʒʤʧθ')
@@ -595,6 +627,26 @@ class G2P:
             text=tk.text, tag=tk.tag_, whitespace=tk.whitespace_,
             _=MToken.Underscore(is_head=True, num_flags='', prespace=False)
         ) for tk in doc]
+        for i in range(len(mutable_tokens) - 2):
+            if mutable_tokens[i].tag in ('NN', 'NNP') and mutable_tokens[i+1].tag in ('VBP', 'VB'):
+                if mutable_tokens[i+2].tag == 'NNS' and is_clause_subject_head(mutable_tokens, i):
+                    mutable_tokens[i+1].tag = 'NN'
+                    mutable_tokens[i+2].tag = 'VBZ'
+        for i in range(1, len(mutable_tokens) - 1):
+            if mutable_tokens[i-1].tag in ('NN', 'NNP') and mutable_tokens[i].tag == 'NNS':
+                if mutable_tokens[i+1].tag in ('DT', 'PRP', 'PRP$'):
+                    if is_clause_subject_head(mutable_tokens, i-1) and not has_downstream_verb(mutable_tokens, i+2):
+                        mutable_tokens[i].tag = 'VBZ'
+        for i, tk in enumerate(mutable_tokens):
+            if tk.tag == 'VBZ' and i + 1 < len(mutable_tokens) and mutable_tokens[i+1].tag == 'IN':
+                j = i + 2
+                while j < len(mutable_tokens):
+                    if mutable_tokens[j].text.lower() in PLURAL_AUX_VERBS:
+                        tk.tag = 'NNS'
+                        break
+                    if mutable_tokens[j].tag not in NP_TAGS:
+                        break
+                    j += 1
         if not features:
             return mutable_tokens
         align = spacy.training.Alignment.from_strings(tokens, [tk.text for tk in mutable_tokens])
