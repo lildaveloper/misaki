@@ -100,6 +100,42 @@ def has_downstream_verb(tokens, after_idx):
             return True
     return False
 
+def is_clause_subject_plural(tokens, idx):
+    for j in range(idx - 1, -1, -1):
+        tag = getattr(tokens[j], 'tag_', getattr(tokens[j], 'tag', ''))
+        text = tokens[j].text.lower()
+        if tag in CLAUSE_PUNCT or text in ('and', 'but', 'or'):
+            break
+        if tag in ('NNS', 'NNPS') or text in ('they', 'we'):
+            return True
+        if tag in ('NN', 'NNP') or text in ('he', 'she', 'it'):
+            return False
+    return False
+
+def has_present_coordinate_clause(tokens, read_idx):
+    coord_idx = None
+    for j in range(read_idx - 1, -1, -1):
+        tag = getattr(tokens[j], 'tag_', getattr(tokens[j], 'tag', ''))
+        text = tokens[j].text.lower()
+        if tag in CLAUSE_PUNCT:
+            break
+        if text in ('and', 'but', 'or'):
+            coord_idx = j
+            break
+    if coord_idx is None:
+        return False
+
+    has_vbd = False
+    has_present = False
+    for tk in tokens[:coord_idx]:
+        tag = getattr(tk, 'tag_', getattr(tk, 'tag', ''))
+        if tag == 'VBD':
+            has_vbd = True
+        elif tag in ('VBP', 'VBZ') or (tag == 'MD' and tk.text.lower() in ('can', 'may', 'will', 'must', 'should')):
+            has_present = True
+
+    return has_present and not has_vbd
+
 LEXICON_ORDS = [39, 45, *range(65, 91), *range(97, 123)]
 CONSONANTS = frozenset('bdfhjklmnpstvwzðŋɡɹɾʃʒʤʧθ')
 # EXTENDER = 'ː'
@@ -647,6 +683,10 @@ class G2P:
                     if mutable_tokens[j].tag not in NP_TAGS:
                         break
                     j += 1
+        for i, tk in enumerate(mutable_tokens):
+            if tk.text.lower() in ('read', 'reread') and tk.tag == 'VBD':
+                if is_clause_subject_plural(mutable_tokens, i) and has_present_coordinate_clause(mutable_tokens, i):
+                    tk.tag = 'VBP'
         if not features:
             return mutable_tokens
         align = spacy.training.Alignment.from_strings(tokens, [tk.text for tk in mutable_tokens])
