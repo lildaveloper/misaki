@@ -73,6 +73,8 @@ INITIAL_SPECIFIERS = frozenset(['DT', 'PRP$', 'JJ', 'JJR', 'JJS', 'NN', 'NNP'])
 CLAUSE_PUNCT = frozenset(['.', '?', '!', ':', ';', ',', '—', '--', '-LRB-', '-RRB-'])
 OPEN_PUNCT_TAGS = frozenset(['``', "''", '""', '-LRB-'])
 OPEN_PUNCT_CHARS = frozenset(['"', "'", '“', '”', '‘', '’', '(', '[', '{'])
+SINGULAR_3P_PRP = frozenset(['he', 'she', 'it'])
+SUBJECT_TAGS = frozenset(['PRP', 'NN', 'NNP', 'NNS', 'WP', 'WDT'])
 
 def is_clause_subject_head(tokens, idx):
     clause_start = 0
@@ -100,41 +102,6 @@ def has_downstream_verb(tokens, after_idx):
             return True
     return False
 
-def is_clause_subject_plural(tokens, idx):
-    for j in range(idx - 1, -1, -1):
-        tag = getattr(tokens[j], 'tag_', getattr(tokens[j], 'tag', ''))
-        text = tokens[j].text.lower()
-        if tag in CLAUSE_PUNCT or text in ('and', 'but', 'or'):
-            break
-        if tag in ('NNS', 'NNPS') or text in ('they', 'we'):
-            return True
-        if tag in ('NN', 'NNP') or text in ('he', 'she', 'it'):
-            return False
-    return False
-
-def has_present_coordinate_clause(tokens, read_idx):
-    coord_idx = None
-    for j in range(read_idx - 1, -1, -1):
-        tag = getattr(tokens[j], 'tag_', getattr(tokens[j], 'tag', ''))
-        text = tokens[j].text.lower()
-        if tag in CLAUSE_PUNCT:
-            break
-        if text in ('and', 'but', 'or'):
-            coord_idx = j
-            break
-    if coord_idx is None:
-        return False
-
-    has_vbd = False
-    has_present = False
-    for tk in tokens[:coord_idx]:
-        tag = getattr(tk, 'tag_', getattr(tk, 'tag', ''))
-        if tag == 'VBD':
-            has_vbd = True
-        elif tag in ('VBP', 'VBZ') or (tag == 'MD' and tk.text.lower() in ('can', 'may', 'will', 'must', 'should')):
-            has_present = True
-
-    return has_present and not has_vbd
 
 LEXICON_ORDS = [39, 45, *range(65, 91), *range(97, 123)]
 CONSONANTS = frozenset('bdfhjklmnpstvwzðŋɡɹɾʃʒʤʧθ')
@@ -683,10 +650,66 @@ class G2P:
                     if mutable_tokens[j].tag not in NP_TAGS:
                         break
                     j += 1
+        # 1. 3rd-person singular subject agreement on zero-inflection verbs
         for i, tk in enumerate(mutable_tokens):
-            if tk.text.lower() in ('read', 'reread') and tk.tag == 'VBD':
-                if is_clause_subject_plural(mutable_tokens, i) and has_present_coordinate_clause(mutable_tokens, i):
-                    tk.tag = 'VBP'
+            if tk.text.lower() in ('read', 'reread') and tk.tag in ('VBP', 'VB'):
+                has_aux = False
+                has_singular_subj = False
+                for j in range(i - 1, -1, -1):
+                    j_tag = getattr(mutable_tokens[j], 'tag_', getattr(mutable_tokens[j], 'tag', ''))
+                    j_text = mutable_tokens[j].text.lower()
+                    if j_tag in CLAUSE_PUNCT:
+                        break
+                    if j_tag == 'MD' or j_text in ('to', 'do', 'does', 'did'):
+                        has_aux = True
+                        break
+                    if j_text in SINGULAR_3P_PRP or j_tag in ('NN', 'NNP'):
+                        has_singular_subj = True
+                        break
+                if has_singular_subj and not has_aux:
+                    tk.tag = 'VBD'
+
+        # 2. Conjoined Verb Phrase (coordinate VP) tense parallelism
+        for i in range(len(mutable_tokens)):
+            tk = mutable_tokens[i]
+            if tk.tag.startswith('VB'):
+                if tk.tag == 'VBN' and i + 1 < len(mutable_tokens) and mutable_tokens[i+1].text.lower() == 'by':
+                    continue
+                coord_idx = -1
+                has_subject = False
+                has_aux = False
+                for j in range(i - 1, -1, -1):
+                    j_tag = getattr(mutable_tokens[j], 'tag_', getattr(mutable_tokens[j], 'tag', ''))
+                    j_text = mutable_tokens[j].text.lower()
+                    if j_tag in (',', 'CC', ';') or j_text in ('and', 'or', 'then'):
+                        coord_idx = j
+                        break
+                    if j_tag in SUBJECT_TAGS:
+                        has_subject = True
+                        break
+                    if j_tag in ('MD', 'TO') or j_text in ('to', 'do', 'does', 'did'):
+                        has_aux = True
+                        break
+                    if j_tag in ('.', '!', '?', ':', '-LRB-', '-RRB-'):
+                        break
+
+                if coord_idx != -1 and not has_subject and not has_aux:
+                    gov_verb_tag = None
+                    for j in range(coord_idx - 1, -1, -1):
+                        j_tag = getattr(mutable_tokens[j], 'tag_', getattr(mutable_tokens[j], 'tag', ''))
+                        if j_tag in ('.', '!', '?', ';', ':', '-LRB-', '-RRB-'):
+                            break
+                        if j_tag == 'VB':
+                            gov_verb_tag = 'VB'
+                            break
+                        elif j_tag in ('VBD', 'VBN'):
+                            gov_verb_tag = 'VBD'
+                            break
+
+                    if gov_verb_tag == 'VB' and tk.tag in ('VBD', 'VBN'):
+                        tk.tag = 'VB'
+                    elif gov_verb_tag == 'VBD' and tk.tag in ('VB', 'VBP'):
+                        tk.tag = 'VBD'
         if not features:
             return mutable_tokens
         align = spacy.training.Alignment.from_strings(tokens, [tk.text for tk in mutable_tokens])
